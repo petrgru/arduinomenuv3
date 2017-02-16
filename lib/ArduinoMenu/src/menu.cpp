@@ -1,141 +1,422 @@
-/********************
-Sept. 2014 Rui Azevedo - ruihfazevedo(@rrob@)gmail.com
-creative commons license 3.0: Attribution-ShareAlike CC BY-SA
-This software is furnished "as is", without technical support, and with no
-warranty, express or implied, as to its usefulness for any purpose.
-
-Thread Safe: No
-Extensible: Yes
-
-Arduino generic menu system
-www.r-site.net
-
-v2.0 mods - calling action on every element
-
-*/
-#include <Arduino.h>
 #include "menu.h"
+using namespace Menu;
 
-//#define DEBUG
-#ifdef DEBUG
-#include <streamFlow.h>
-#include <menuPrint.h>
-menuPrint debugOut(Serial);
-#endif
+result Menu::doNothing() {return proceed;}
+result Menu::doExit() {return quit;}
+action Menu::noAction(doNothing);
 
-const char menu::exit[] MEMMODE="Exit";
-char menu::escCode='/';
-char menu::enterCode='*';
-char menu::upCode='+';
-char menu::downCode='-';
-char menu::enabledCursor='>';
-char menu::disabledCursor='-';
-prompt menu::exitOption(menu::exit);
-bool menu::wrapMenus=false;
-menuNode* menuNode::activeNode=NULL;
+//this is for idle (menu suspended)
+result Menu::inaction(menuOut& o,idleEvent) {return proceed;}
 
-//PROGMEM AUX PRINT
-void print_P(menuOut& s,const char* at) {
-  while(uint8_t ch=pgmByteNear(at++)) s.write(ch);
+idx_t prompt::printRaw(menuOut& out,idx_t len) const {
+  return print_P(out,getText(),len);
 }
 
-bool menuOut::needRedraw(menu& m,int i) {
-  return
-    (drawn!=&m)//menu changed
-    ||(top!=lastTop)//screen scrolled
-    ||(m.sel!=lastSel&&((i==m.sel)||(i==lastSel)))//selection changed
-    ||(i<m.sz&&((prompt*)pgmPtrNear(m.data[i]))->needRedraw(*this,i==m.sel));//reflexivity, value changed
-  }
+idx_t prompt::printTo(navRoot &root,bool sel,menuOut& out, idx_t idx,idx_t len) {
+  out.fmtStart(menuOut::fmtPrompt,root.node(),idx);
+  idx_t r=printRaw(out,len);
+  out.fmtEnd(menuOut::fmtPrompt,root.node(),idx);
+  return r;
+}
 
-//menu navigation engine
-//iteract with input until a selection is done, return the selection
-int menu::menuKeys(menuOut &p,Stream& c,bool canExit) {
-  int op=-2;
-  if (!c.available()) return op;//only work when stream data is available
-  int ch=c.read();
-  if (ch!=menu::enterCode) {
-    if (ch==menu::downCode) {
+prompt* menuNode::seek(idx_t* uri,idx_t len) {
+  if (len&&uri[0]>=0&&uri[0]<sz()) {
+    prompt& e=operator[](uri[0]);
+    assert(e.isMenu());
+    return e.seek(++uri,--len);
+  } else return NULL;
+}
+bool menuNode::async(const char *uri,navRoot& root,idx_t lvl) {
+  //Serial<<*(prompt*)this<<" menuNode::async "<<uri<<" lev:"<<lvl<<endl;
+  if ((!*uri)||(uri[0]=='/'&&!uri[1])) return this;
+  uri++;
+  idx_t n=0;
+  while (*uri) {
+    char* d=strchr(numericChars,uri[0]);
+    if (d) n=n*10+((*d)-'0');
+    else break;
+    uri++;
+  }
+  if (root.path[lvl].target!=this) {
+    //Serial<<"escaping"<<endl;
+    while(root.level>lvl) root.doNav(escCmd);
+  }
+  //Serial<<*(prompt*)this<<" doNav idxCmd:"<<n<<endl;Serial.flush();
+  //if (this->operator[](n).type()!=fieldClass) {//do not enter edit mode on fields over async
+    //Serial<<"doNav idxCmd"<<endl;
+    root.doNav(navCmd(idxCmd,n));
+  //}
+  //Serial<<"recurse on ["<<n<<"]-"<<operator[](n)<<" uri:"<<uri<<" lvl:"<<lvl<<endl;Serial.flush();
+  return operator[](n).async(uri,root,++lvl);
+}
+
+idx_t menuOut::printRaw(const char* at,idx_t len) {
+  const char* p=at;
+  uint8_t ch;
+  for(int n=0;(ch=*(at++))&&(len==0||n<len);n++) {
+    write(ch);
+  }
+  return at-p;
+}
+
+void menuOut::doNav(navCmd cmd,navNode &nav) {
+  panel p=panels[nav.root->level];
+  idx_t t=top(nav)-1;
+  idx_t sz=nav.target->sz();
+  switch(cmd.cmd) {
+    case scrlUpCmd:
+      if (t) {
+        t--;
+        if (nav.sel>t+sz) nav.sel--;
+      }
+      break;
+    case scrlDownCmd:
+      if (t+p.h<sz) {
+        t++;
+        if (nav.sel<t) nav.sel++;
+      }
+      break;
+    default: assert(false);
+  }
+}
+
+menuOut& menuOut::operator<<(const prompt& p) {
+  print_P(*this,p.getText());
+  return *this;
+}
+
+void menuOut::clearChanged(navNode &nav) {
+  //if (nav.target->dirty) Serial<<"clear dirty "<<*(prompt*)nav.target<<" sz:"<<nav.sz()<<endl;
+  nav.target->dirty=false;
+  for(idx_t i=0;i<maxY();i++) {
+    if (i+tops[nav.root->level]>=nav.sz()) break;
+    //if (nav[i+top].dirty) Serial<<"clear sub dirty "<<nav[i+top]<<endl;
+    nav[i+tops[nav.root->level]].dirty=false;
+  }
+}
+
+// draw a menu preview on a panel
+void menuOut::previewMenu(navRoot& root,menuNode& menu,idx_t panelNr) {
+  clear(panelNr);
+  setColor(fgColor,false);
+  setCursor(0,0,panelNr);
+  for(idx_t i=0;i<maxY(panelNr);i++) {
+    if (i>=menu.sz()) break;
+    prompt& p=menu[i];
+    clearLine(i,panelNr,bgColor,false,p.enabled);
+    setCursor(0,i,panelNr);
+    setColor(fgColor,false,p.enabled);
+    drawCursor(i,false,p.enabled,false,panelNr);
+    setColor(fgColor,false,p.enabled,false);
+    p.printTo(root,false,*this,i,panels[panelNr].w);
+  }
+}
+
+//determin panel number here and distribute menu and previews among the panels
+void menuOut::printMenu(navNode &nav) {
+  menuNode& focus=nav.root->active();
+  int lvl=nav.root->level;
+  if (focus.sysStyles()&_parentDraw) lvl--;
+  navNode& nn=nav.root->path[lvl];
+  int k=min(lvl,panels.sz-1);
+  if ((style&usePreview)&&k) k--;
+  for(int i=0;i<k;i++) {
+    navNode &n=nav.root->path[lvl-k+i];
+    if (!((style&minimalRedraw)&&panels.nodes[i]==&n)) {
+      previewMenu(*nav.root,*n.target,i);
+      panels.nodes[i]=&n;
+    }
+  }
+  panels.cur=k;
+  printMenu(nn,k);
+  panels.nodes[k]=&nav;//for cleaning purposes
+  for(int i=k+2;i<panels.sz;i++) if (panels.nodes[i]) {
+    clear(i);
+    panels.nodes[i]=NULL;
+  }
+}
+
+//bool menuOut::changed
+
+// generic (menuOut) print menu on a panel
+void menuOut::printMenu(navNode &nav,idx_t panelNr) {
+  //menuNode& focus=nav.root->active();
+  idx_t topi=nav.root->level-((nav.root->active().sysStyles()&_parentDraw)?1:0);
+  idx_t ot=tops[topi];
+  idx_t st=(nav.root->showTitle&&(maxY(panelNr)>1))?1:0;//do not use titles on single line devices!
+  while(nav.sel+st>=(tops[topi]+maxY(panelNr))) tops[topi]++;
+  while(nav.sel<tops[topi]||(tops[topi]&&((nav.sz()-tops[topi])<maxY(panelNr)-st))) tops[topi]--;
+  bool all=(style&redraw)
+    ||(tops[topi]!=ot)
+    ||(drawn!=nav.target)
+    ||(panels.nodes[panelNr]!=&nav);
+  if (!(all||(style&minimalRedraw))) //non minimal draw will redraw all if any change
+    all|=nav.target->changed(nav,*this);
+  all|=nav.target->dirty;
+  if (!(all||(style&minimalRedraw))) return;
+  panel pan=panels[panelNr];
+
+  //-----> panel start
+  fmtStart(fmtPanel,nav);
+  if (all) {
+    clear(panelNr);
+    if (st) {
+      ///------> titleStart
+      fmtStart(fmtTitle,nav,-1);
+      setColor(titleColor,false);
+      clearLine(0,panelNr);
+      setColor(titleColor,true);
+      setCursor(0,0,panelNr);
+      //print('[');
+      nav.target->prompt::printTo(*nav.root,true,*this,-1,pan.w-1);
+      //print(']');
+      //*this<<'['<<*(prompt*)nav.target<<']';
+      ///<----- titleEnd
+      fmtEnd(fmtTitle,nav,-1);
+    }
+  }
+  //bool any=all;
+  //------> bodyStart
+  fmtStart(fmtBody,nav);
+  for(idx_t i=0;i<maxY(panelNr)-st;i++) {
+    int ist=i+st;
+    if (i+tops[topi]>=nav.sz()) break;
+    prompt& p=nav[i+tops[topi]];
+    idx_t len=pan.w;
+    if (all||p.changed(nav,*this,false)) {
+      //any=true;
+      //-------> opStart
+      fmtStart(fmtOp,nav,i);
+      bool selected=nav.sel==i+tops[topi];
+      bool ed=nav.target==&p;
+      //-----> idxStart
+      fmtStart(fmtIdx,nav,i);
+      clearLine(ist,panelNr,bgColor,selected,p.enabled);
+      setCursor(0,ist,panelNr);
+      setColor(fgColor,selected,p.enabled,ed);
+      if (drawNumIndex&style) {
+        char a=tops[topi]+i+'1';
+        print('[');
+        print(a<='9'?a:'-');
+        print(']');
+        //*this<<'['<<(a<='9'?a:'-')<<']';
+        len-=3;
+      }
+      //<------idxEnd
+      fmtEnd(fmtIdx,nav,i);
+      //------> cursorStart
+      fmtStart(fmtCursor,nav,i);
+      drawCursor(ist,selected,p.enabled,ed,panelNr);//assuming only one character
+      //<------ cursorEnd
+      fmtEnd(fmtCursor,nav,i);
+      len--;
+      //---->opBodyStart
+      fmtStart(fmtOpBody,nav,i);
+      setColor(fgColor,selected,p.enabled,ed);
+      if (len>0) p.printTo(*nav.root,selected,*this,i,len);
+      //<---opBodyEnd
+      fmtEnd(fmtOpBody,nav,i);
+      if (selected&&panels.sz>panelNr+1) {
+        if(p.isMenu()) {
+          //----->  previewStart
+          previewMenu(*nav.root,*(menuNode*)&p,panelNr+1);
+          //TODO: do we need preview pointers?
+          //because now i use navNode* instead and its not available here
+          //panels.nodes[panelNr+1]=(menuNode*)&p;
+          //<----  previewEnd
+        } else if (panels.nodes[panelNr+1]) clear(panelNr+1);
+      }
+      //opEnd
+      fmtEnd(fmtOp,nav,i);
+    }
+  }
+  //<-----bodyEnd
+  fmtEnd(fmtBody,nav,-1);
+  //if (any) Serial<<"printMenu "<<*(prompt*)nav.target<<endl;
+  drawn=nav.target;
+  //lastSel=nav.sel;
+  //<---- panel end
+  fmtEnd(fmtPanel,nav,-1);
+}
+
+navRoot* navNode::root=NULL;
+
+bool menuNode::changed(const navNode &nav,const menuOut& out,bool sub) {
+  if (nav.target!=this) return dirty;
+  if (dirty) return true;
+  if (sub) for(int i=0;i<out.maxY();i++) {
+    if (i+out.tops[nav.root->level]>=nav.sz()) break;
+    if (operator[](i+out.tops[nav.root->level]).changed(nav,out,false)) return true;
+  }
+  return false;
+}
+
+//aux function, turn input character into navigation command
+navCmd navNode::navKeys(char ch) {
+  if (strchr(numericChars,ch)) {
+    return navCmd(idxCmd,ch-'1');
+  }
+  for(uint8_t i=0;i<sizeof(options->navCodes)/sizeof(navCode);i++)
+    if (options->navCodes[i].ch==ch) return options->navCodes[i].cmd;
+  return noCmd;
+}
+
+void navTarget::doNav(navNode& nav,navCmd cmd) {
+  nav.doNavigation(cmd);
+}
+
+void navTarget::parseInput(navNode& nav,Stream& in) {
+  doNav(nav,nav.navKeys(in.read()));
+}
+
+//generic navigation (aux function)
+navCmd navNode::doNavigation(navCmd cmd) {
+  idx_t osel=sel;
+  navCmd rCmd=cmd;
+  switch(cmd.cmd) {
+    /*case scrlUpCmd:
+      if (!target->isVariant())
+        root->out.doNav(cmd,*this);*/
+    case downCmd:
       sel--;
-      if (sel<0) {
-        if (wrapMenus) {
-          sel=sz-(canExit?0:1);
-          if (sel+1>=p.maxY) {
-            p.top=sel-p.maxY+1;
-            //Serial<<"menuKeys top1:"<<p.top<<endl;
-          }
-        } else sel=0;
-      }
-      if (p.top>sel) {
-        p.top=sel;
-        //Serial<<"menuKeys top2:"<<p.top<<endl;
-      }
-    } else if (ch==menu::upCode) {
+      if (sel<0) {if(wrap()) sel=sz()-1; else sel=0;}
+      break;
+    /*case scrlDownCmd:
+      if (!target->isVariant())
+        root->out.doNav(cmd,*this);*/
+    case upCmd:
       sel++;
-      if (sel>(sz-(canExit?0:1))) {
-        if (wrapMenus) {
-          sel=0;
-          p.top=0;
-        } else sel=sz-(canExit?0:1);
+      if (sel>=sz()) {if(wrap()) sel=0; else sel=sz()-1;}
+      break;
+    case escCmd:
+      assert(root);
+      rCmd=root->exit();
+      break;
+    case enterCmd:
+      assert(root);
+      rCmd=root->enter();
+      break;
+    case selCmd:
+    case idxCmd: {
+        idx_t at=(idx_t)cmd.param;//-'1';send us numeric index pls!
+        if (at>=0&&at<=sz()) {
+          sel=at;
+          if (cmd.cmd==idxCmd) {
+            assert(root);
+            //Serial<<"indexing... "<<endl;
+            rCmd=root->enter();
+          }
+        }
       }
-      if (sel+1-p.top>p.maxY) {
-        p.top=sel-p.maxY+1;
-        //Serial<<"menuKeys top3:"<<p.top<<endl;
-      }
-    } else if (ch==menu::escCode) {
-    	op=-1;
+      break;
+    case noCmd:
+    default: break;
+  }
+  if(osel!=sel) {
+    if (target->sysStyles()&(_parentDraw|_isVariant)) {
+      target->dirty=true;
     } else {
-      op=ch-'1';
+      operator[](osel).dirty=true;
+      operator[](sel).dirty=true;
     }
-  } else {
-    op=sel==sz?-1:sel;
+    //send focus In/Out events
+    event(blurEvent,osel);
+    event(focusEvent,sel);
   }
-  if (!((op>=0&&op<sz)||(canExit&&op==-1))) op=-2;//validate the option
-  //c.read();
-  return op;
+  return rCmd;
 }
 
-//execute the menu
-//cycle:
-//	...->draw -> input scan -> iterations -> [activate submenu or user function] -> ...
-// draw: call target device object
-//input scan: call the navigation function (self)
-promptFeedback menu::activate(menuOut& p,Stream& c,bool canExit) {
-	if (activeNode!=this) {
-    //Serial<<"first time activation, canExit param:"<<canExit<<endl;
-    if (action(*this,p,c)) return true;
-		previousMenu=(menu*)activeNode;
-		activeNode=this;
-		sel=0;
-		p.top=0;
-   	this->canExit=canExit;
-	}
-  int op=-1;
-  printMenu(p,canExit);
-  op=menuKeys(p,c,canExit);
-  if (op>=0&&op<sz) {
-  	sel=op;
-    prompt* cp=(prompt*)pgmPtrNear(data[op]);
-    if (cp->enabled) {
-      printMenu(p,canExit);//clearing old selection
-      if (cp->activate(p,c,true)) {
-        p.clear();
-      	activeNode=previousMenu;
-        //print_P(debugOut,this->text);
-        //Serial<<"->";
-        //print_P(debugOut,this->operator[](sel).text);
-        //Serial<<" quiting... "<<p.lastSel<<endl;
-        return true;
+result navNode::event(eventMask e,idx_t i) {
+  prompt& p=operator[](i);
+  eventMask m=p.events();
+  eventMask me=(eventMask)(e&m);
+  if (me) {
+    return p(e,p);
+  }
+  return proceed;
+}
+
+result navNode::sysEvent(eventMask e,idx_t i) {
+  prompt& p=operator[](i);
+  return p(e,p);
+}
+
+void navRoot::doInput(Stream& in) {
+  if (sleepTask) {
+    if (options->getCmdChar(enterCmd)==in.read()) idleOff();
+  } else if (in.available())//while ((!sleepTask)&&in.available())//if not doing something else and there is input
+    navFocus->parseInput(node(),in);//deliver navigation input task to target...
+}
+
+void navRoot::doNav(navCmd cmd) {
+  //Serial<<"navRoot::doNav "<<cmd.cmd<<" sleepTask:"<<(!!sleepTask)<<endl;
+  if (sleepTask&&cmd.cmd==enterCmd) idleOff();
+  else if (!sleepTask) switch (cmd.cmd) {
+    case scrlUpCmd:
+    case scrlDownCmd:
+      out.doNav(cmd,node());//scroll is perceived better at output device
+      break;
+    default:
+      //Serial<<"navFocus->doNav "<<cmd.param<<endl;
+      navFocus->doNav(node(),cmd);
+  }
+}
+
+
+result maxDepthError(menuOut& o,idleEvent e) {
+  //o<<F("Error: maxDepth reached!\n\rincrease maxDepth on your scketch.");
+  o.print(F("Error: maxDepth reached!\n\rincrease maxDepth on your scketch."));
+  return proceed;
+}
+
+navCmd navRoot::enter() {
+  //Serial<<"navRoot::enter "<<selected()<<endl;
+  if (
+    selected().enabled
+    &&selected().sysHandler(activateEvent,node(),selected())==proceed
+  ) {
+    //Serial<<"sysHandler allowed activate"<<endl;
+    prompt& sel=selected();
+    bool canNav=sel.canNav();
+    bool isMenu=sel.isMenu();
+    result go=node().event(enterEvent);//item event sent here
+    //Serial<<"enterEvent returned "<<go<<" isMenu:"<<isMenu<<" canNav:"<<canNav<<endl;
+    navCmd rCmd=enterCmd;
+    if (go==proceed&&isMenu&&canNav) {
+      //Serial<<"proceeding..."<<endl;
+      if (level<maxDepth) {
+        active().dirty=true;
+        menuNode* dest=(menuNode*)&selected();
+        level++;
+        node().target=dest;
+        node().sel=0;
+        active().dirty=true;
+        sel.sysHandler(enterEvent,node(),selected());
+        rCmd=enterCmd;
+      } else {
+        idleOn(maxDepthError);
+        rCmd=noCmd;
       }
+    } else if (go==quit&&!selected().isMenu()) exit();
+    if (canNav) {
+      navFocus=(navTarget*)&sel;
+      navFocus->dirty=true;
     }
-  } else if (op==-1) {//then exit
-    p.clear();
-  	activeNode=previousMenu;
-	 	c.flush();//reset the encoder
+    return rCmd;
   }
-  return 0;
+  return noCmd;
 }
 
-void menu::poll(menuOut& p,Stream& c,bool canExit) {
-  menuNode* n=activeNode?activeNode:this;
-  n->activate(p,c,(activeNode==this||!activeNode)?canExit:true);
+navCmd navRoot::exit() {
+  node().event(exitEvent,node().sel);
+  navFocus->dirty=true;
+  if (navFocus->isMenu()) {
+    if (level) level--;
+    else {
+      idleOn(idleTask);
+    }
+  }
+  active().dirty=true;
+  navFocus=&active();
+  return escCmd;
 }

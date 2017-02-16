@@ -6,8 +6,8 @@ http://www.r-site.net/?at=//op%5B%40id=%273090%27%5D
 Sep.2014 Rui Azevedo - ruihfazevedo(@rrob@)gmail.com
 creative commons license 3.0: Attribution-ShareAlike CC BY-SA
 This software is furnished "as is", without technical support, and with no
-warranty, express or implied, as to its usefulness for any purpose.
 
+warranty, express or implied, as to its usefulness for any purpose.
 Thread Safe: No
 Extensible: Yes
 
@@ -15,164 +15,196 @@ LCD library:
 https://bitbucket.org/fmalpartida/new-liquidcrystal/wiki/Home
 http://playground.arduino.cc/Code/LCD3wires
 */
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>//F. Malpartida LCD's driver
-#include <menu.h>//menu macros and objects
-#include <menuLCDs.h>
-#include <menuFields.h>
-#include <quadEncoder.h>//quadrature encoder driver and fake stream
-#include <keyStream.h>//keyboard driver and fake stream (for the encoder button)
-#include <chainStream.h>// concatenate multiple input streams (this allows adding a button to the encoder)
+#ifndef ARDUINO_SAM_DUE
 
-// rotary encoder pins
-#define encA    2
-#define encB    3
-#define encBtn  4
+  #include <Wire.h>
+  #include <LiquidCrystal_I2C.h>//F. Malpartida LCD's driver
+  #include <menu.h>//menu macros and objects
+  #include <menuIO/lcdOut.h>//malpartidas lcd menu output
+  #include <menuIO/encoderIn.h>//quadrature encoder driver and fake stream
+  #include <menuIO/keyIn.h>//keyboard driver and fake stream (for the encoder button)
+  #include <menuIO/chainStream.h>// concatenate multiple input streams (this allows adding a button to the encoder)
+  #include <menuIO/serialOut.h>
+  using namespace Menu;
 
-#define LEDPIN 13
-
-//LiquidCrystal_I2C lcd(0x27);//, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address
+  //LiquidCrystal_I2C lcd(0x27);//, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address
+  //LiquidCrystal_I2C lcd(0x27, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address and pinout
 LiquidCrystal_I2C lcd(0x26, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address and pinout
 
-//aux vars
-int ledCtrl=0;
-bool runMenu=false;
-bool scrSaverEnter=true;
-int percent;//just testing changing this var
-double fps=0;
-unsigned long lastFpsChk=0;
-int counter=0;
+  // Encoder /////////////////////////////////////
+  #define encA 2
+  #define encB 3
+  //this encoder has a button here
+  #define encBtn 4
 
-///////////////////////////////////////////////////////////////////////////
-//functions to wire as menu actions
-bool pauseMenu() {
-    runMenu=false;
-    scrSaverEnter=true;
-}
-bool ledOn() {
-    Serial.println("set led on!");
-    digitalWrite(LEDPIN,ledCtrl=1);
-    return false;
-}
+  encoderIn<encA,encB> encoder;//simple quad encoder driver
+  #define ENC_SENSIVITY 4
+  encoderInStream<encA,encB> encStream(encoder,ENC_SENSIVITY);// simple quad encoder fake Stream
 
-bool ledOff() {
-    Serial.println("set led off!");
-    digitalWrite(LEDPIN,ledCtrl=0);
-    return false;
-}
+  //a keyboard with only one key as the encoder button
+  keyMap encBtn_map[]={{-encBtn,options->getCmdChar(enterCmd)}};//negative pin numbers use internal pull-up, this is on when low
+  keyIn<1> encButton(encBtn_map);//1 is the number of keys
 
-bool quit() {
-    Serial.println("Quiting after action call");
-    return true;
-}
+  //input from the encoder + encoder button + serial
+  Stream* inputsList[]={&encStream,&encButton,&Serial};
+  chainStream<3> in(inputsList);//3 is the number of inputs
 
-/////////////////////////////////////////////////////////////////////////
-// MENU DEFINITION
-// here we define the menu structure and wire actions functions to it
-// empty options are just for scroll testing
+  #define LEDPIN A3
 
-/*bool setLed() {
-  digitalWrite(LEDPIN,ledCtrl);
-  return false;
-}*/
-TOGGLE(ledCtrl,setLed,"Led:",
-       VALUE("On",HIGH,ledOn),
-       VALUE("Off",LOW,ledOff)
-);
+  result showEvent(eventMask e,navNode& nav,prompt& item) {
+    Serial<<e<<" on "<<item<<endl;
+    return proceed;
+  }
 
-int selTest=0;
-SELECT(selTest,selMenu,"Select",
-       VALUE("Zero",0),
-       VALUE("One",1),
-       VALUE("Two",2)
-);
+  int test=55;
 
-int chooseTest=-1;
-CHOOSE(chooseTest,chooseMenu,"Choose ",
-       VALUE("First",1),
-       VALUE("Second",2),
-       VALUE("Third",3),
-       VALUE("Last",-1)
-);
+  result action1(eventMask e,navNode& nav, prompt &item) {
+    //Serial<<e<<" event on "<<item<<", proceed menu"<<endl;
+    Serial.flush();
+    return proceed;
+  }
 
-MENU(subMenu,"SubMenu"
-,OP("A",quit)
-,OP("B",quit)
-,OP("C",quit)
-,OP("D",quit)
-,OP("E",quit)
-,OP("F",quit)
-,OP("G",quit)
-,OP("H",quit)
-);
+  result action2(eventMask e, navNode& nav, prompt &item, Stream &in, menuOut &out) {
+    //Serial<<item<<" "<<e<<" event on "<<item<<", quiting menu."<<endl;
+    Serial.flush();
+    return quit;
+  }
 
-MENU(mainMenu,"Main menu",
-     SUBMENU(setLed),
-     OP("LED On",ledOn),
-     OP("LED Off",ledOff),
-     SUBMENU(selMenu),
-     SUBMENU(chooseMenu),
-     SUBMENU(subMenu),
-     FIELD(percent,"Percent","%",0,100,10,1),
-     FIELD(fps,"fps [","]",0,0,0,0),
-     FIELD(counter,"counter [","]",0,0,0,0),
-     OP("Exit",pauseMenu)
-);
+  int ledCtrl=LOW;
 
-void scrSaver() {
-    if (scrSaverEnter) {
-        lcd.clear();
-        lcd.print("|www.r-site.net|");
-        lcd.setCursor(0,1);
-        lcd.print("|click to enter|");
-        scrSaverEnter=false;
+  result ledOn() {
+    ledCtrl=HIGH;
+    return proceed;
+  }
+  result ledOff() {
+    ledCtrl=LOW;
+    return proceed;
+  }
+
+  TOGGLE(ledCtrl,setLed,"Led: ",doNothing,noEvent,noStyle//,doExit,enterEvent,noStyle
+    ,VALUE("On",HIGH,doNothing,noEvent)
+    ,VALUE("Off",LOW,doNothing,noEvent)
+  );
+
+  int selTest=0;
+  SELECT(selTest,selMenu,"Select",doNothing,noEvent,noStyle
+    ,VALUE("Zero",0,doNothing,noEvent)
+    ,VALUE("One",1,doNothing,noEvent)
+    ,VALUE("Two",2,doNothing,noEvent)
+  );
+
+  int chooseTest=-1;
+  CHOOSE(chooseTest,chooseMenu,"Choose",doNothing,noEvent,noStyle
+    ,VALUE("First",1,doNothing,noEvent)
+    ,VALUE("Second",2,doNothing,noEvent)
+    ,VALUE("Third",3,doNothing,noEvent)
+    ,VALUE("Last",-1,doNothing,noEvent)
+  );
+
+  //customizing a prompt look!
+  //by extending the prompt class
+  class altPrompt:public prompt {
+  public:
+    altPrompt(const promptShadow& p):prompt(p) {}
+    idx_t printTo(navRoot &root,bool sel,menuOut& out, idx_t idx,idx_t len) override {
+      return out.printRaw("special prompt!",len);;
     }
-}
+  };
 
-//the quadEncoder
-#define ENC_SENSIVITY 4
-quadEncoder quadEncoder(encA,encB);//simple quad encoder driver
-quadEncoderStream enc(quadEncoder,ENC_SENSIVITY);// simple quad encoder fake Stream
+  MENU(subMenu,"Sub-Menu",showEvent,anyEvent,noStyle
+    ,OP("Sub1",showEvent,anyEvent)
+    ,OP("Sub2",showEvent,anyEvent)
+    ,OP("Sub3",showEvent,anyEvent)
+    ,altOP(altPrompt,"",showEvent,anyEvent)
+    ,EXIT("<Back")
+  );
 
-//a keyboard with only one key :D, this is the encoder button
-keyMap encBtn_map[]={{-encBtn,menu::enterCode}};//negative pin numbers means we have a pull-up, this is on when low
-keyLook<1> encButton(encBtn_map);
+  /*extern menu mainMenu;
+  TOGGLE((mainMenu[1].enabled),togOp,"Op 2:",doNothing,noEvent,noStyle
+    ,VALUE("Enabled",enabledStatus,doNothing,noEvent)
+    ,VALUE("disabled",disabledStatus,doNothing,noEvent)
+  );*/
 
-//alternative to previous but now we can input from Serial too...
-Stream* in3[]={&enc,&encButton,&Serial};
-chainStream<3> allIn(in3);
+  result alert(menuOut& o,idleEvent e) {
+    if (e==idling) {
+      o.setCursor(0,0);
+      o<<"alert test";
+      o.setCursor(0,1);
+      o<<"[select] to continue...";
+    }
+    return proceed;
+  }
 
-//describing a menu output, alternatives so far are Serial or LiquidCrystal LCD
-menuLCD menu_lcd(lcd,20,4);//menu output device
+  result doAlert(eventMask e, navNode& nav, prompt &item, Stream &in, menuOut &out) {
+    nav.root->idleOn(alert);
+    return proceed;
+  }
 
-void setup()
-{
-    pinMode(LEDPIN,OUTPUT);
+  MENU(mainMenu,"Main menu",doNothing,noEvent,wrapStyle
+    ,OP("Op1",action1,anyEvent)
+    ,OP("Op2",action2,enterEvent)
+    //,SUBMENU(togOp)
+    ,FIELD(test,"Test","%",0,100,10,1,doNothing,noEvent,wrapStyle)
+    ,SUBMENU(subMenu)
+    ,SUBMENU(setLed)
+    ,OP("LED On",ledOn,enterEvent)
+    ,OP("LED Off",ledOff,enterEvent)
+    ,SUBMENU(selMenu)
+    ,SUBMENU(chooseMenu)
+    ,OP("Alert test",doAlert,enterEvent)
+    ,EXIT("<Back")
+  );
+
+  #define MAX_DEPTH 4
+
+  /*const panel panels[] MEMMODE={{0,0,16,2}};
+  navNode* nodes[sizeof(panels)/sizeof(panel)];
+  panelsList pList(panels,nodes,1);
+  idx_t tops[MAX_DEPTH];
+  lcdOut outLCD(&lcd,tops,pList);//output device for LCD
+  menuOut* outputs[]={&outLCD};//list of output devices
+  outputsList out(outputs,1);//outputs list with 2 outputs
+  */
+
+  MENU_OUTPUTS(out,MAX_DEPTH
+    ,LCD_OUT(lcd,{0,0,20,4})
+    ,SERIAL_OUT(Serial)
+    ,NONE
+  );
+  NAVROOT(nav,mainMenu,MAX_DEPTH,in,out);//the navigation root object
+
+  result idle(menuOut& o,idleEvent e) {
+    switch(e) {
+      case idleStart:o<<"suspending menu!";break;
+      case idling:o<<"suspended...";break;
+      case idleEnd:o<<"resuming menu.";break;
+    }
+    return proceed;
+  }
+
+  void setup() {
     pinMode(encBtn,INPUT_PULLUP);
+    pinMode(LEDPIN,OUTPUT);
     Serial.begin(115200);
     while(!Serial);
-    Wire.begin();
-    quadEncoder.begin();
+    Serial<<"Arduino Menu Library"<<endl;Serial.flush();
+    encoder.begin();
     lcd.begin(20,4);
-    lcd.home();
-    lcd.print("Menu 2.x test");
-    menu::wrapMenus=true;
-    mainMenu[7].disable();
-    mainMenu[8].disable();
-}
+    nav.idleTask=idle;//point a function to be used when menu is suspended
+    mainMenu[1].enabled=disabledStatus;
+    nav.showTitle=false;
+    lcd.setCursor(0, 0);
+    lcd<<("Menu 3.0 LCD");
+    lcd.setCursor(0, 1);
+    lcd<<("r-site.net");
+    delay(2000);
+  }
 
-void loop()
-{
-    if (runMenu) mainMenu.poll(menu_lcd,allIn);
-    else if (allIn.read()==menu::enterCode) runMenu=true;
-    else scrSaver();
-    //simulate the delay of your program... if this number rises too much the menu will have bad navigation experience
-    //if so, then the menu can be wired into a timmer... leaving the shorter end to your code while it is running
-    counter=millis()/1000%60;
-    int d=micros()-lastFpsChk;
-    if (d>0) {
-        fps=1000000.0/d;
-        lastFpsChk+=d;
-    }
-    delay(50);
-}
+  void loop() {
+    nav.poll();
+    digitalWrite(LEDPIN, ledCtrl);
+    delay(100);//simulate a delay as if other tasks are running
+  }
+
+#endif
+
